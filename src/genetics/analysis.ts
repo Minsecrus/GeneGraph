@@ -1,24 +1,10 @@
-import type { CrossAnalysis, LocusAllele, OffspringCell, PhenotypeRule } from './types'
-import { parseGenotype } from './parser'
-import { matchPhenotype } from './rules'
-import {
-  buildLocusDisplayKey,
-  buildNormalizedGenotype,
-  normalizeOffspringLoci,
-  toFraction,
-} from './utils'
-
-function defaultLifecycleStage(cell: OffspringCell): OffspringCell {
-  return {
-    ...cell,
-    viability: { isViable: true, reason: null },
-    sexContext: {
-      chromosomalSex: null,
-      phenotypicSex: null,
-      reversalApplied: false,
-    },
-  }
-}
+import { buildGametePool } from './gametePipeline'
+import { resolveZygoteLifecycle } from './lifecyclePipeline'
+import { DIPLOID_BIPARENTAL_MODEL } from './models'
+import { buildParentState } from './parentState'
+import type { CrossAnalysis, ExtraRule, OffspringCell, PhenotypeRule } from './types'
+import { buildLocusDisplayKey, toFraction } from './utils'
+import { buildDiploidZygote } from './zygotePipeline'
 
 function buildPhenotypeFactorization(cells: OffspringCell[]) {
   const groupCounts = new Map<string, Map<string, number>>()
@@ -67,62 +53,38 @@ export function runCrossAnalysis(
   parent1Input: string,
   parent2Input: string,
   rules: PhenotypeRule[],
+  extraRules: ExtraRule[] = [],
 ): CrossAnalysis {
-  const parent1 = parseGenotype(parent1Input)
-  const parent2 = parseGenotype(parent2Input)
+  const parent1 = buildParentState('parent1', parent1Input)
+  const parent2 = buildParentState('parent2', parent2Input)
 
-  const parent1Loci = parent1.loci.map((locus) => locus.locusKey).join(',')
-  const parent2Loci = parent2.loci.map((locus) => locus.locusKey).join(',')
+  const parent1Loci = [...new Set(parent1.genotype.loci.map((locus) => locus.locusKey))]
+    .sort()
+    .join(',')
+  const parent2Loci = [...new Set(parent2.genotype.loci.map((locus) => locus.locusKey))]
+    .sort()
+    .join(',')
   if (parent1Loci !== parent2Loci) {
     throw new Error('父本与母本的位点集合不一致，当前版本要求两者使用相同位点。')
   }
 
-  const lociOrder = parent1.loci.map((locus) => locus.locusKey)
-  const grid = parent1.gametes.map((rowGamete) => ({
+  const lociOrder = parent1.genotype.loci.map((locus) => locus.locusKey)
+  const gametePool1 = buildGametePool(parent1, extraRules)
+  const gametePool2 = buildGametePool(parent2, extraRules)
+  const zygotes = gametePool1.flatMap((rowGamete) =>
+    gametePool2.map((columnGamete) => buildDiploidZygote(rowGamete, columnGamete, lociOrder)),
+  )
+  const resolvedCells = new Map(
+    zygotes.map((zygote) => [zygote.id, resolveZygoteLifecycle(zygote, rules, extraRules)]),
+  )
+  const grid = gametePool1.map((rowGamete) => ({
     gamete: rowGamete,
-    cells: parent2.gametes.map((columnGamete) => {
-      const allelesByLocus = new Map<string, [LocusAllele, LocusAllele]>()
-
-      for (const allele of rowGamete.alleles) {
-        const partner = columnGamete.alleles.find(
-          (candidate) => candidate.locusKey === allele.locusKey,
-        )
-        if (!partner) {
-          throw new Error(`配子缺少位点 ${allele.locusKey}。`)
-        }
-
-        allelesByLocus.set(allele.locusKey, [
-          {
-            locusKey: allele.locusKey,
-            symbol: allele.symbol,
-            normalizedSymbol: allele.symbol.toUpperCase(),
-            isUppercase: allele.symbol === allele.symbol.toUpperCase(),
-          },
-          {
-            locusKey: partner.locusKey,
-            symbol: partner.symbol,
-            normalizedSymbol: partner.symbol.toUpperCase(),
-            isUppercase: partner.symbol === partner.symbol.toUpperCase(),
-          },
-        ])
+    cells: gametePool2.map((columnGamete) => {
+      const cell = resolvedCells.get(`${rowGamete.id}-${columnGamete.id}`)
+      if (!cell) {
+        throw new Error('合子生命周期解析失败。')
       }
-
-      const offspringLoci = normalizeOffspringLoci(lociOrder, allelesByLocus)
-      const genotype = buildNormalizedGenotype(offspringLoci)
-      const matched = matchPhenotype(offspringLoci, rules)
-
-      return defaultLifecycleStage({
-        id: `${rowGamete.id}-${columnGamete.id}`,
-        genotype,
-        phenotype: matched.phenotype,
-        match: matched.match,
-        viability: { isViable: true, reason: null },
-        sexContext: {
-          chromosomalSex: null,
-          phenotypicSex: null,
-          reversalApplied: false,
-        },
-      })
+      return cell
     }),
   }))
 
@@ -145,7 +107,13 @@ export function runCrossAnalysis(
   const phenotypeFactorization = buildPhenotypeFactorization(allCells)
   return {
     loci: lociOrder.map((locusKey) => buildLocusDisplayKey(locusKey)),
+    model: DIPLOID_BIPARENTAL_MODEL,
     parents: { parent1, parent2 },
+    gametePools: {
+      parent1: gametePool1,
+      parent2: gametePool2,
+    },
+    zygotes,
     grid,
     genotypeStats: [...genotypeCounts.entries()]
       .map(([label, count]) => ({

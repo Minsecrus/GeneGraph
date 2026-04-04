@@ -1,15 +1,32 @@
 import { Fragment, useMemo, useState } from "react";
-import { GitBranch, Info } from "lucide-react";
+import { BookOpen, GitBranch, Info } from "lucide-react";
 import {
+  DEFAULT_EXTRA_RULES,
   DEFAULT_RULES,
   type CrossAnalysis,
   type OffspringCell,
+  parseExtraRules,
   parseRules,
   runCrossAnalysis,
 } from "./genetics";
 
-const DEFAULT_PARENT_1 = "AaBb";
-const DEFAULT_PARENT_2 = "AaBb";
+const DEFAULT_PARENT_1 = "Aa Bb";
+const DEFAULT_PARENT_2 = "Aa Bb";
+const CLASSIC_PEA_9331_EXAMPLE = {
+  parent1: "Aa Bb",
+  parent2: "Aa Bb",
+  rules: DEFAULT_RULES,
+  extraRules: DEFAULT_EXTRA_RULES,
+};
+const SEX_LINKED_EXAMPLE = {
+  parent1: "Aa ; X(c)X(c)",
+  parent2: "aa ; X(C)Y",
+  rules: `A_ 红花
+aa 白花
+C_ 抗病
+cc 感病`,
+  extraRules: DEFAULT_EXTRA_RULES,
+};
 
 function getDivisors(value: number) {
   const divisors: number[] = [];
@@ -119,21 +136,79 @@ function formatRulePreview(rawRule: string) {
   return rawRule.trim() || "未定义规则";
 }
 
+function renderGenotypeText(text: string) {
+  const parts: React.ReactNode[] = [];
+  const pattern = /([XYZW])\(([A-Za-z]+)\)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    parts.push(
+      <span key={`${match.index}-${match[0]}`}>
+        <span>{match[1]}</span>
+        <sup className="mr-px text-[0.62em] leading-none">{match[2]}</sup>
+      </span>,
+    );
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts.length > 0 ? parts : text;
+}
+
+function buildLifecycleStats(cells: OffspringCell[]) {
+  const viability = new Map<string, number>();
+  const sex = new Map<string, number>();
+
+  for (const cell of cells) {
+    const viabilityKey = cell.viability.isViable ? "存活" : "致死";
+    viability.set(viabilityKey, (viability.get(viabilityKey) ?? 0) + 1);
+
+    const sexKey = cell.sexContext.phenotypicSex ?? "未定性";
+    sex.set(sexKey, (sex.get(sexKey) ?? 0) + 1);
+  }
+
+  return {
+    viability: [...viability.entries()].map(([label, count]) => ({
+      label,
+      count,
+    })),
+    sex: [...sex.entries()].map(([label, count]) => ({ label, count })),
+  };
+}
+
 function App() {
   const [parent1Input, setParent1Input] = useState(DEFAULT_PARENT_1);
   const [parent2Input, setParent2Input] = useState(DEFAULT_PARENT_2);
   const [rulesInput, setRulesInput] = useState(DEFAULT_RULES);
+  const [extraRulesInput, setExtraRulesInput] = useState(DEFAULT_EXTRA_RULES);
   const [highlightToken, setHighlightToken] = useState<string | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [exampleIndex, setExampleIndex] = useState(0);
 
   const ruleSet = useMemo(() => parseRules(rulesInput), [rulesInput]);
+  const extraRuleSet = useMemo(
+    () => parseExtraRules(extraRulesInput),
+    [extraRulesInput],
+  );
   const analysisState = useMemo<{
     analysis: CrossAnalysis | null;
     runtimeError: string | null;
   }>(() => {
     try {
       return {
-        analysis: runCrossAnalysis(parent1Input, parent2Input, ruleSet.rules),
+        analysis: runCrossAnalysis(
+          parent1Input,
+          parent2Input,
+          ruleSet.rules,
+          extraRuleSet.rules,
+        ),
         runtimeError: null,
       };
     } catch (error) {
@@ -142,18 +217,41 @@ function App() {
         runtimeError: error instanceof Error ? error.message : "输入无效。",
       };
     }
-  }, [parent1Input, parent2Input, ruleSet.rules]);
+  }, [extraRuleSet.rules, parent1Input, parent2Input, ruleSet.rules]);
   const analysis = analysisState.analysis;
 
   const activeError =
     analysisState.runtimeError ??
     analysis?.errors[0] ??
     ruleSet.errors[0] ??
+    extraRuleSet.errors[0] ??
     null;
 
   const normalizedParents = analysis
-    ? [analysis.parents.parent1.normalized, analysis.parents.parent2.normalized]
+    ? [
+        analysis.parents.parent1.genotype.normalized,
+        analysis.parents.parent2.genotype.normalized,
+      ]
     : [null, null];
+  const lifecycleStats = analysis
+    ? buildLifecycleStats(analysis.grid.flatMap((row) => row.cells))
+    : null;
+
+  function applyExample(index: number) {
+    const examples = [CLASSIC_PEA_9331_EXAMPLE, SEX_LINKED_EXAMPLE];
+    const example = examples[index % examples.length];
+    setParent1Input(example.parent1);
+    setParent2Input(example.parent2);
+    setRulesInput(example.rules);
+    setExtraRulesInput(example.extraRules);
+    setHighlightToken(null);
+  }
+
+  function cycleExample() {
+    const nextIndex = (exampleIndex + 1) % 2;
+    setExampleIndex(nextIndex);
+    applyExample(nextIndex);
+  }
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-[1600px] flex-col gap-4 p-4 md:p-6">
@@ -168,9 +266,23 @@ function App() {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={cycleExample}
+            className="rounded-xl border border-zinc-800 bg-black p-2.5 text-zinc-300 transition hover:border-zinc-700 hover:text-zinc-100"
+            aria-label="切换示例"
+            title={
+              exampleIndex === 0
+                ? "当前下一个：伴性遗传"
+                : "当前下一个：经典豌豆9331"
+            }
+          >
+            <BookOpen className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
             onClick={() => setInfoOpen(true)}
             className="rounded-xl border border-zinc-800 bg-black p-2.5 text-zinc-300 transition hover:border-zinc-700 hover:text-zinc-100"
             aria-label="About"
+            title="About"
           >
             <Info className="h-4 w-4" />
           </button>
@@ -180,6 +292,7 @@ function App() {
             rel="noopener noreferrer"
             className="rounded-xl border border-zinc-800 bg-black p-2.5 text-zinc-300 transition hover:border-zinc-700 hover:text-zinc-100"
             aria-label="GitHub"
+            title="GitHub"
           >
             <GitBranch className="h-4 w-4" />
           </a>
@@ -193,14 +306,14 @@ function App() {
               <InputField
                 label="P1"
                 value={parent1Input}
-                placeholder="AaBb"
+                placeholder="Aa BBb ; X(C)X(c)"
                 hint={normalizedParents[0] ?? ""}
                 onChange={setParent1Input}
               />
               <InputField
                 label="P2"
                 value={parent2Input}
-                placeholder="AaBb"
+                placeholder="Aa Bb ; X(C)Y"
                 hint={normalizedParents[1] ?? ""}
                 onChange={setParent2Input}
               />
@@ -219,7 +332,23 @@ function App() {
               spellCheck={false}
               className="min-h-56 w-full resize-y rounded-xl border border-zinc-800 bg-black px-3 py-2 font-mono text-sm text-zinc-100 outline-none transition focus:border-teal-400"
             />
-            <div className="mt-2 text-[11px] text-zinc-600">pattern label</div>
+          </Panel>
+
+          <Panel>
+            <div className="mb-2 flex items-center justify-between text-xs text-zinc-500">
+              <span>Extra Rules</span>
+              <span>{extraRuleSet.rules.length}</span>
+            </div>
+            <textarea
+              value={extraRulesInput}
+              onChange={(event) => setExtraRulesInput(event.target.value)}
+              rows={7}
+              spellCheck={false}
+              className="min-h-44 w-full resize-y rounded-xl border border-zinc-800 bg-black px-3 py-2 font-mono text-sm text-zinc-100 outline-none transition focus:border-teal-400"
+              placeholder={
+                "配子致死 P1 aB\n配子致死 雄 X\n合子致死 Aabb\n基因定性 A_ 雌\n性反转 bb 雄"
+              }
+            />
           </Panel>
 
           {activeError ? (
@@ -235,13 +364,13 @@ function App() {
               <div
                 className="grid min-w-full gap-2"
                 style={{
-                  gridTemplateColumns: `9rem repeat(${analysis.parents.parent2.gametes.length}, minmax(6rem, 1fr))`,
+                  gridTemplateColumns: `9rem repeat(${analysis.gametePools.parent2.length}, minmax(6rem, 1fr))`,
                 }}
               >
                 <div className={axisClassName}>P1/P2</div>
-                {analysis.parents.parent2.gametes.map((gamete) => (
+                {analysis.gametePools.parent2.map((gamete) => (
                   <div key={`col-${gamete.id}`} className={axisClassName}>
-                    <span>{gamete.label}</span>
+                    <span>{renderGenotypeText(gamete.label)}</span>
                     <span className="text-[11px] text-zinc-500">
                       {gamete.probabilityText}
                     </span>
@@ -251,7 +380,7 @@ function App() {
                 {analysis.grid.map((row) => (
                   <Fragment key={row.gamete.id}>
                     <div className={axisClassName}>
-                      <span>{row.gamete.label}</span>
+                      <span>{renderGenotypeText(row.gamete.label)}</span>
                       <span className="text-[11px] text-zinc-500">
                         {row.gamete.probabilityText}
                       </span>
@@ -308,6 +437,26 @@ function App() {
 
         <Panel>
           <div className="space-y-2">
+            {lifecycleStats ? (
+              <div className="mb-3 grid gap-2 rounded-xl border border-zinc-800 bg-black p-3 text-xs text-zinc-400">
+                <div className="flex items-center justify-between">
+                  <span>存活统计</span>
+                  <span className="font-mono">
+                    {lifecycleStats.viability
+                      .map((item) => `${item.label}:${item.count}`)
+                      .join("  ")}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>性别统计</span>
+                  <span className="font-mono">
+                    {lifecycleStats.sex
+                      .map((item) => `${item.label}:${item.count}`)
+                      .join("  ")}
+                  </span>
+                </div>
+              </div>
+            ) : null}
             {ruleSet.rules.map((rule, index) => (
               <div
                 key={rule.id}
@@ -324,6 +473,19 @@ function App() {
                   style={{ backgroundColor: rule.color }}
                   aria-hidden="true"
                 />
+              </div>
+            ))}
+            {extraRuleSet.rules.map((rule, index) => (
+              <div
+                key={rule.id}
+                className="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2"
+              >
+                <div className="w-5 text-xs text-zinc-500">E{index + 1}</div>
+                <div className="min-w-0 flex-1 overflow-hidden">
+                  <div className="truncate font-mono text-xs text-zinc-300">
+                    {formatRulePreview(rule.source)}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -350,6 +512,7 @@ function App() {
             <div className="space-y-3 text-sm text-zinc-300">
               <p>高中遗传学杂交模拟工具。</p>
               <p>支持多位点基因型解析、规则匹配、棋盘格和比例分析。</p>
+              <p>QQ 群：885719573</p>
               <p>
                 By{" "}
                 <a
@@ -413,8 +576,10 @@ function StatsBlock({
               onMouseEnter={() => onHover(token)}
               onMouseLeave={() => onHover(null)}
             >
-              <strong className="truncate font-mono text-zinc-100">
-                {item.label}
+              <strong className="truncate font-mono leading-relaxed text-zinc-100">
+                {title === "Genotype"
+                  ? renderGenotypeText(item.label)
+                  : item.label}
               </strong>
               <span className="text-zinc-400">{item.count}</span>
               <small className="font-mono text-zinc-500">
@@ -444,18 +609,30 @@ function CellCard({
   return (
     <article
       className={[
-        "relative flex min-h-24 flex-col justify-between border border-zinc-900 px-3 py-2 text-left transition",
+        "relative flex min-h-28 flex-col justify-between border border-zinc-900 px-3 py-2 text-left transition",
+        !cell.viability.isViable
+          ? "bg-rose-950/20"
+          : cell.sexContext.phenotypicSex === "雌"
+            ? "bg-pink-400/8"
+            : cell.sexContext.phenotypicSex === "雄"
+              ? "bg-sky-400/8"
+              : "",
         isActive ? "z-10 ring-1 ring-teal-400/80" : "",
       ].join(" ")}
     >
-      <button
-        type="button"
-        className="w-fit cursor-pointer bg-transparent p-0 font-mono text-left text-sm text-zinc-100"
-        onMouseEnter={() => onHover(`genotype:${cell.genotype}`)}
-        onMouseLeave={() => onHover(null)}
-      >
-        {cell.genotype}
-      </button>
+      <div className="flex items-start justify-between gap-2">
+        <button
+          type="button"
+          className="w-fit cursor-pointer bg-transparent p-0 font-mono text-left text-sm text-zinc-100"
+          onMouseEnter={() => onHover(`genotype:${cell.genotype}`)}
+          onMouseLeave={() => onHover(null)}
+        >
+          {renderGenotypeText(cell.genotype)}
+        </button>
+        <small className="font-mono text-[11px] text-zinc-500">
+          {cell.probabilityText}
+        </small>
+      </div>
       <button
         type="button"
         className="w-fit cursor-pointer bg-transparent p-0 text-left text-sm"
@@ -473,6 +650,18 @@ function CellCard({
           ))}
         </span>
       </button>
+      <div className="flex flex-wrap gap-1">
+        {cell.sexContext.reversalApplied ? (
+          <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] text-amber-200">
+            性反转
+          </span>
+        ) : null}
+        {!cell.viability.isViable ? (
+          <span className="rounded-full border border-rose-400/30 bg-rose-400/10 px-2 py-0.5 text-[10px] text-rose-200">
+            {cell.viability.reason ?? "致死"}
+          </span>
+        ) : null}
+      </div>
       <small className="font-mono text-[11px] text-zinc-600">
         {cell.match.map((item) => item.pattern).join(" + ")}
       </small>

@@ -221,7 +221,7 @@ export function matchPhenotype(
       const normalizedToken = normalizeRuleToken(clause.token)
       const isExactToken = !normalizedToken.includes('_')
       return isExactToken
-        ? normalizedToken === exactActual
+        ? normalizedToken === exactActual || normalizedToken === stateActual
         : matchesToken(normalizedToken, stateActual)
     })
 

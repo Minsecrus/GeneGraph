@@ -12,11 +12,47 @@ export function gcd(a: number, b: number): number {
 }
 
 export function toFraction(probability: number) {
-  const precision = 1024
-  const numerator = Math.round(probability * precision)
-  const denominator = precision
-  const divisor = gcd(numerator, denominator)
-  return `${numerator / divisor}/${denominator / divisor}`
+  if (!Number.isFinite(probability)) {
+    return '0/1'
+  }
+  if (probability <= 0) {
+    return '0/1'
+  }
+  if (probability >= 1) {
+    return '1/1'
+  }
+
+  const tolerance = 1e-10
+  let h1 = 1
+  let h0 = 0
+  let k1 = 0
+  let k0 = 1
+  let value = probability
+
+  for (let index = 0; index < 16; index += 1) {
+    const a = Math.floor(value)
+    const h2 = a * h1 + h0
+    const k2 = a * k1 + k0
+
+    if (Math.abs(probability - h2 / k2) < tolerance) {
+      const divisor = gcd(h2, k2)
+      return `${h2 / divisor}/${k2 / divisor}`
+    }
+
+    h0 = h1
+    h1 = h2
+    k0 = k1
+    k1 = k2
+
+    const fractional = value - a
+    if (Math.abs(fractional) < tolerance) {
+      break
+    }
+    value = 1 / fractional
+  }
+
+  const divisor = gcd(h1, k1)
+  return `${h1 / divisor}/${k1 / divisor}`
 }
 
 export function assertGeneSymbol(char: string) {
@@ -61,6 +97,57 @@ export function compareGameteLabels(left: string, right: string) {
   }
 
   return 0
+}
+
+function normalizeSexChromosomeRaw(raw: string) {
+  const match = raw.match(/^([XYZW])(?:\(([A-Za-z]+)\))?$/)
+  if (!match) {
+    return raw
+  }
+
+  const [, chromosome, genes = ''] = match
+  if (!genes) {
+    return chromosome
+  }
+
+  const sortedGenes = genes
+    .split('')
+    .sort((left, right) => compareAlleleSymbols(left, right))
+    .join('')
+
+  return `${chromosome}(${sortedGenes})`
+}
+
+export function normalizeSexChromosomeDisplay(labels: string[]) {
+  return [...labels]
+    .map(normalizeSexChromosomeRaw)
+    .sort((left, right) => {
+      const leftChromosome = left[0] ?? ''
+      const rightChromosome = right[0] ?? ''
+      if (leftChromosome !== rightChromosome) {
+        return leftChromosome.localeCompare(rightChromosome)
+      }
+
+      const leftGenes = left.match(/\(([A-Za-z]+)\)/)?.[1] ?? ''
+      const rightGenes = right.match(/\(([A-Za-z]+)\)/)?.[1] ?? ''
+      const maxLength = Math.max(leftGenes.length, rightGenes.length)
+      for (let index = 0; index < maxLength; index += 1) {
+        const leftGene = leftGenes[index]
+        const rightGene = rightGenes[index]
+        if (!leftGene) {
+          return 1
+        }
+        if (!rightGene) {
+          return -1
+        }
+        const comparison = compareAlleleSymbols(leftGene, rightGene)
+        if (comparison !== 0) {
+          return comparison
+        }
+      }
+
+      return 0
+    })
 }
 
 export function normalizeLocus(alleles: GenotypeLocus['alleles']): GenotypeLocus {
@@ -168,6 +255,18 @@ export function wrapHue(value: number) {
 
 export function buildNormalizedGenotype(loci: GenotypeLocus[]) {
   return loci.map((locus) => locus.alleles.map((allele) => allele.symbol).join('')).join('')
+}
+
+export function buildFullGenotypeLabel(loci: GenotypeLocus[], sexChromosomes: string[] = []) {
+  const autosomes = buildNormalizedGenotype(loci)
+  const sex = normalizeSexChromosomeDisplay(sexChromosomes).join('')
+  if (!sex) {
+    return autosomes
+  }
+  if (!autosomes) {
+    return sex
+  }
+  return `${autosomes}${sex}`
 }
 
 export function normalizeOffspringLoci(
